@@ -99,175 +99,139 @@
         └─lv_port               -- lvgl与硬件的接口
 ```
 
-## 软件项目流程图分析（全链路）
+## Software 系统框架和工作原理（基于源码）
 
-本文聚焦 **Software/X-Track** 软件工程，按“启动 -> 后台数据处理 -> 页面渲染 -> 关机保存”的主路径梳理系统执行流。
+下面从 **框架分层、启动流程、任务调度、数据链路、页面机制、关机持久化** 六个维度，说明 `Software/X-Track` 的实际工作方式。
 
-### 1. 启动总流程（MCU 固件）
+### 1) 系统框架（分层视角）
+
+```mermaid
+flowchart TB
+    HW[硬件外设<br/>GPS/IMU/MAG/SD/Display/Encoder/Power] --> HAL[USER/HAL<br/>设备驱动封装 + 周期任务]
+    HAL --> DP[USER/App/Common/DataProc<br/>业务数据节点]
+    DP <--> DC[USER/App/Utils/DataCenter<br/>Account 发布/订阅总线]
+    DC --> UI[USER/App/Pages<br/>Dialplate/LiveMap/SystemInfos/Startup]
+    UI --> LVGL[LVGL + lv_port]
+```
+
+- **HAL 层**：统一管理外设初始化与更新（电源、GPS、SD、传感器、显示、输入、音频）。
+- **DataProc 层**：把“设备输入”加工成“业务状态”，例如运动统计、轨迹过滤、配置管理、录制控制。
+- **UI 层**：页面只关注展示与交互，通过 DataCenter 拉取/订阅数据，避免直接耦合底层驱动。
+
+### 2) 启动流程（main 到首屏）
 
 ```mermaid
 flowchart TD
-    A[main.cpp::main] --> B[HAL::HAL_Init]
-    B --> C[lv_init]
-    C --> D[lv_port_init]
-    D --> E[App_Init]
-    E --> F[DataProc_Init]
-    E --> G[ResourcePool::Init]
-    E --> H[PageManager 安装页面]
-    H --> I[Push Startup 页面]
-    I --> J[进入主循环 loop]
-    J --> K[HAL::HAL_Update]
-    J --> L[lv_task_handler]
-    J --> M[__WFI 低功耗等待中断]
+    A[main] --> B[NVIC/Delay 底层初始化]
+    B --> C[HAL::HAL_Init]
+    C --> D[lv_init]
+    D --> E[lv_port_init]
+    E --> F[App_Init]
+    F --> G[DataProc_Init]
+    G --> H[发送 STORAGE_CMD_LOAD + SYSCONFIG_CMD_LOAD]
+    H --> I[ResourcePool::Init]
+    I --> J[安装页面并 Push Startup]
+    J --> K[for(;;): HAL_Update + lv_task_handler + __WFI]
 ```
 
-关键点：
-- `main()` 完成底层初始化后进入死循环，循环内由 `HAL_Update + lv_task_handler` 驱动“设备层任务 + GUI任务”。
-- `App_Init()` 负责应用层核心装配：初始化数据处理节点、加载配置、初始化资源池、注册并跳转页面。
+- `main.cpp` 中，主循环固定为 `HAL::HAL_Update()` + `lv_task_handler()` + `__WFI()`。
+- `App_Init()` 内完成三件关键事：
+  1. 初始化 DataProc 节点；
+  2. 从存储加载系统配置；
+  3. 安装页面工厂并进入 `Startup` 页面。
 
-### 2. 软件分层与职责
+### 3) 任务调度与实时性（HAL 层）
+
+`HAL::HAL_Init()` 采用 `MillisTaskManager` 注册周期任务，形成“协作式调度 + 定时中断补充”的运行模型：
+
+| 任务 | 周期 | 作用 |
+|---|---:|---|
+| `Power_EventMonitor` | 100 ms | 监控电源事件（如关机触发） |
+| `GPS_Update` | 200 ms | 更新 GPS 数据 |
+| `SD_Update` | 500 ms | 更新 SD 卡状态 |
+| `Memory_DumpInfo` | 1000 ms | 打印内存/栈信息 |
+| `IMU_Update` / `MAG_Update` | 1000 ms（使能时） | 传感器采样更新 |
+
+另外，`Timer_SetInterrupt(..., 10*1000, ...)` 的中断回调会执行：
+- `Power_Update()`
+- `Encoder_Update()`
+- `Audio_Update()`
+
+这使输入响应、电源状态、音频播放具备较稳定的时基。
+
+### 4) DataProc 工作原理（业务数据中枢）
+
+`DP_LIST.inc` 定义了系统后台节点：
+
+`Storage / Clock / GPS / Power / SportStatus / Recorder / IMU / MAG / StatusBar / MusicPlayer / TzConv / SysConfig / TrackFilter`
+
+它们都以 `Account` 形式接入 `DataCenter`，并通过四类事件交互：
+- `EVENT_PUB_PUBLISH`：发布者主动推送；
+- `EVENT_SUB_PULL`：订阅者主动拉取；
+- `EVENT_NOTIFY`：发送命令/通知；
+- `EVENT_TIMER`：节点定时回调。
+
+#### 典型数据链路 A：定位与运动统计
 
 ```mermaid
 flowchart LR
-    subgraph HW[硬件/外设]
-        GPS[GPS]
-        IMU[IMU]
-        MAG[MAG]
-        SD[SD 卡]
-        ENC[编码器/按键]
-        PWR[电源管理]
-        DISP[显示屏]
-    end
-
-    subgraph HAL[USER/HAL]
-        HALInit[HAL_Init]
-        HALUpdate[HAL_Update]
-        Driver[各外设驱动封装]
-    end
-
-    subgraph APP[USER/App]
-        DP[DataProc 数据节点]
-        DC[DataCenter 发布/订阅]
-        PM[PageManager 页面生命周期]
-        Pages[Dialplate/LiveMap/SystemInfos/Startup]
-        Res[ResourcePool]
-    end
-
-    HW --> HAL
-    HAL --> DP
-    DP <--> DC
-    DC --> Pages
-    PM --> Pages
-    Res --> Pages
-    Pages --> DISP
+    GPSNode[DP_GPS<br/>读取 HAL::GPS_GetInfo] --> Sport[DP_SportStatus<br/>速度/里程/卡路里累计]
+    Sport --> Storage[DP_Storage<br/>持久化关键字段]
+    Sport --> UI[表盘/状态栏显示]
 ```
 
-分层理解：
-- **HAL 层**：对电源、GPS、传感器、SD、编码器、音频、显示进行统一接口封装，并通过定时任务调度更新。
-- **DataProc 层**：把“设备数据 + 业务状态 + 配置持久化 + 轨迹处理”组织成多个数据节点。
-- **UI 层**：页面系统使用 PageManager 管理生命周期与切页动画，页面通过 DataCenter 订阅数据。
+- `DP_GPS` 定时读取 GPS；卫星数达到阈值时发布定位；并在连接状态变化时通知 `MusicPlayer` 播放提示音。
+- `DP_SportStatus` 以 500ms 周期计算速度、总里程、总时长、最大速度、卡路里等。
 
-### 3. 后台数据处理（DataProc + DataCenter）
+#### 典型数据链路 B：轨迹过滤与 GPX 录制
 
-`DataProc_Init()` 会按 `DP_LIST.inc` 批量创建并初始化节点（如 `GPS`、`Power`、`Storage`、`Recorder`、`SysConfig`、`TrackFilter` 等）。
+```mermaid
+flowchart LR
+    GPS[GPS 发布位置] --> TF[DP_TrackFilter<br/>坐标转换+关键点提取]
+    TF --> REC[DP_Recorder<br/>写入 GPX 文件]
+    Clock[DP_Clock 时间] --> REC
+```
+
+- `DP_TrackFilter` 把经纬度转地图坐标并做抽稀，只保留关键轨迹点。
+- `DP_Recorder` 订阅 `GPS/Clock/TrackFilter`，在开始记录后持续写入 GPX。
+
+#### 典型数据链路 C：配置与地图引擎
+
+- `DP_SysConfig` 保存运行参数（时区、音效、地图目录、坐标系等）。
+- `DP_Storage` 在加载时读取 JSON，并据 `SysConfig` 动态设置 `MapConv`：
+  - 地图根目录 `mapDirPath`
+  - 扩展名 `mapExtName`
+  - WGS84/GCJ02 转换开关
+  - 缩放等级范围（扫描 SD 地图目录得到）
+
+### 5) 页面系统工作原理（PageManager）
+
+- 页面由 `AppFactory::CreatePage()` 根据名称实例化（`Startup/LiveMap/Dialplate/SystemInfos/...`）。
+- `PageManager` 负责：
+  1. 页面栈路由（Push/Pop/BackHome）；
+  2. 生命周期状态（Load -> WillAppear -> DidAppear -> WillDisappear -> DidDisappear -> Unload）；
+  3. 切页动画与拖拽返回。
+
+因此，UI 可保持“页面逻辑”与“数据来源”分离：页面不直接操作硬件，只消费 DataProc 输出。
+
+### 6) 关机与数据落盘
 
 ```mermaid
 flowchart TD
-    A[DataProc_Init] --> B[创建 Account 节点]
-    B --> C[节点初始化 _DP_xxx_Init]
-    C --> D[各节点订阅/发布关系建立]
-    D --> E[运行期通过 Publish/Pull/Notify 交互]
-
-    E --> F[GPS/IMU/MAG 产生数据]
-    E --> G[SportStatus 计算运动统计]
-    E --> H[Recorder 记录轨迹到 GPX]
-    E --> I[Storage/SysConfig 读写 JSON 与配置]
-    E --> J[TrackFilter 轨迹抽稀与裁剪]
+    PWR[电源事件] --> CB[HAL::Power_SetEventCallback(App_Uninit)]
+    CB --> SAVE1[SysConfig SAVE]
+    CB --> SAVE2[Storage SAVE]
+    CB --> STOP[Recorder STOP]
 ```
 
-机制说明：
-- `DataCenter` 是“消息总线”，`Account` 是节点载体。
-- 节点间通过 `Publish / Pull / Notify / Timer` 事件通信，降低模块耦合。
-- 启动时先发送 `STORAGE_CMD_LOAD` 与 `SYSCONFIG_CMD_LOAD`，让系统状态恢复到上次运行结果。
+`App_Uninit()` 会在关机路径执行三件事：
+1. 保存系统配置；
+2. 保存业务统计与存储内容；
+3. 停止录制并收尾轨迹文件。
 
-### 4. 页面生命周期与路由流程
+这保证了重启后可以恢复上次状态（位置、参数、累计运动数据等）。
 
-页面创建入口在 `AppFactory::CreatePage()`，由字符串名映射到页面类（`Template`/`LiveMap`/`Dialplate`/`SystemInfos`/`Startup`）。
+### 7) 一句话理解 Software 的工作原理
 
-```mermaid
-stateDiagram-v2
-    [*] --> Startup
-    Startup --> Dialplate: 启动完成
-    Dialplate --> LiveMap: 用户切换
-    LiveMap --> SystemInfos: 用户切换
-    SystemInfos --> Dialplate: 返回
+> 该系统本质是“**HAL 周期采集 + DataCenter 消息总线 + PageManager 页面状态机**”的组合架构：底层持续产出数据，中层做业务聚合与持久化，上层按页面生命周期消费数据并渲染。 
 
-    state PageLifecycle {
-        [*] --> Load
-        Load --> WillAppear
-        WillAppear --> DidAppear
-        DidAppear --> WillDisappear
-        WillDisappear --> DidDisappear
-        DidDisappear --> Unload
-    }
-```
-
-PageManager 提供：
-- 页面栈（Push/Pop/BackHome）；
-- 生命周期状态机（Load/Appear/Disappear/Unload）；
-- 统一切页动画与拖拽交互。
-
-### 5. 运行期主循环与时序
-
-```mermaid
-sequenceDiagram
-    participant Main as main loop
-    participant HAL as HAL_Update
-    participant TM as MillisTaskManager
-    participant DP as DataProc 节点
-    participant UI as LVGL/PageManager
-
-    Main->>HAL: HAL_Update()
-    HAL->>TM: Running(millis)
-    TM-->>DP: 周期触发 GPS/SD/Power/Memory 等任务
-    DP-->>DP: 节点发布/拉取/通知
-    Main->>UI: lv_task_handler()
-    UI-->>UI: 刷新动画/控件/页面状态
-    Main->>Main: __WFI()
-```
-
-解释：
-- 时间敏感的数据采集和状态检查由任务管理器周期驱动。
-- GUI 更新与页面状态机由 LVGL 任务处理器驱动。
-- `__WFI()` 让 MCU 在空闲周期降低功耗。
-
-### 6. 关机与数据落盘流程
-
-```mermaid
-flowchart TD
-    A[触发关机事件] --> B[App_Uninit]
-    B --> C[SysConfig SAVE]
-    B --> D[Storage SAVE]
-    B --> E[Recorder STOP]
-    C --> F[SystemSave.json 更新]
-    D --> F
-    E --> G[轨迹文件收尾/关闭]
-```
-
-- 关机回调在初始化阶段通过 `HAL::Power_SetEventCallback(App_Uninit)` 注册。
-- 退出阶段优先保存配置与统计，并停止记录器，尽量降低掉电丢失风险。
-
-### 7. 软件部分的“项目流”总结
-
-如果从工程管理视角看，软件主链路可以概括为：
-
-1. **平台启动**：`main` 完成 MCU + HAL + LVGL + App 装配；
-2. **状态恢复**：读取存储与系统配置；
-3. **实时运行**：传感器/GPS/电源任务持续产出数据，DataCenter 在节点间分发；
-4. **界面呈现**：页面系统根据订阅数据刷新 UI，并处理用户交互；
-5. **持久化收尾**：关机时保存配置与轨迹，完成一次闭环。
-
-> 对后续二次开发建议：
-> - 新增业务优先以 DataProc 节点接入，避免直接跨页面调用；
-> - 新页面通过 AppFactory + PageManager 生命周期接入；
-> - 将“设备采集频率”和“UI刷新频率”解耦，保持界面流畅和功耗平衡。
