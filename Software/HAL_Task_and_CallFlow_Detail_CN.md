@@ -255,3 +255,61 @@ flowchart LR
 3. **涉及关机路径的模块必须可重入/幂等**，确保 `App_Uninit` 被调用时不会阻塞关机；
 4. **所有 `*_GetInfo` 输出结构体保持零初始化与字段完整性**，降低上层 size/字段误用风险。
 
+---
+
+## 9. GPS 全流程（从获取数据到更新数据）
+
+本节按“硬件输入 -> HAL 解析 -> DataProc 发布 -> 业务/页面消费”给出完整路径。
+
+### 9.1 HAL 侧：采集与解析
+
+1. `HAL::GPS_Init()` 打开 GPS 串口（9600）并输出库版本；
+2. `HAL::GPS_Update()`（在任务调度中每 200ms 调用）循环读取 `GPS_SERIAL` 字节流；
+3. 每个字节喂入 `TinyGPSPlus::encode(c)`，库内部持续更新定位、速度、时间、卫星数；
+4. 上层调用 `HAL::GPS_GetInfo()` 时，将 TinyGPS++ 当前状态打包为 `GPS_Info_t`。
+
+这一步的核心是“**持续喂流 + 按需取快照**”。
+
+### 9.2 DataProc 侧：节点定时发布
+
+1. `DP_GPS` 在 `EVENT_TIMER` 中调用 `HAL::GPS_GetInfo(&gpsInfo)`；
+2. 根据卫星数判断连接状态并在状态变化时 `Notify("MusicPlayer")` 播放提示音；
+3. 当卫星数 `>=3` 时：
+   - `account->Commit(&gpsInfo, sizeof(gpsInfo))`
+   - `account->Publish()`
+
+因此，GPS 从“原始串口流”变为“可订阅的业务消息”。
+
+### 9.3 消费侧：统计、轨迹、页面
+
+- `DP_SportStatus` 周期 Pull/消费 GPS，计算速度、里程、时长、卡路里；
+- `DP_TrackFilter` 订阅 GPS 发布，做坐标转换与抽稀；
+- `DP_Recorder` 在录制激活时消费 GPS + Clock，写入 GPX 轨迹点；
+- 页面（如 Dialplate/LiveMap）通过 DataProc 拉取或订阅结果刷新显示。
+
+```mermaid
+flowchart TD
+    A[GPS 模块串口输出 NMEA] --> B[HAL::GPS_Update 200ms]
+    B --> C[TinyGPSPlus::encode 持续解析]
+    C --> D[HAL::GPS_GetInfo 打包 GPS_Info_t]
+
+    D --> E[DP_GPS EVENT_TIMER]
+    E --> F{satellites >= 3?}
+    F -- 否 --> G[仅状态判断/提示音]
+    F -- 是 --> H[Commit + Publish]
+
+    H --> I[DP_SportStatus: 速度/里程/时长]
+    H --> J[DP_TrackFilter: 坐标转换与抽稀]
+    H --> K[DP_Recorder: 写 GPX 点]
+    I --> L[Dialplate/StatusBar]
+    J --> M[LiveMap]
+    K --> N[SD 卡 GPX 文件]
+```
+
+### 9.4 时序特征与注意点
+
+- GPS 喂流是 200ms 周期任务，不是中断路径；
+- `GPS_GetInfo()` 读取的是“当前解析快照”，不是阻塞式等待定位；
+- 卫星阈值（如 3、5、7）用于控制发布与提示音状态机；
+- 轨迹记录链路依赖 SD 可用与 Recorder 激活状态。
+

@@ -142,6 +142,30 @@ flowchart LR
     S2 --> S3[Commit + Publish SportStatus]
 ```
 
+## 4.3 GPS 端到端数据更新链路（补充）
+
+为了完整覆盖“从 GPS 获取到更新”的路径，可按下面 5 步理解：
+
+1. HAL 任务层：`GPS_Update` 周期读取串口并喂给 TinyGPS++；
+2. HAL 接口层：`GPS_GetInfo` 输出当前快照（经纬度/速度/时间/卫星数）；
+3. DataProc 生产层：`DP_GPS` 在 Timer 事件中拉取快照并 Publish；
+4. DataProc 消费层：`SportStatus/TrackFilter/Recorder` 分别做统计、轨迹抽稀、GPX 落盘；
+5. UI 层：页面通过 DataProc 拉取结果刷新组件。
+
+```mermaid
+flowchart LR
+    A[HAL::GPS_Update] --> B[TinyGPS++ parse]
+    B --> C[HAL::GPS_GetInfo]
+    C --> D[DP_GPS Timer]
+    D --> E[Commit + Publish]
+    E --> F[DP_SportStatus]
+    E --> G[DP_TrackFilter]
+    E --> H[DP_Recorder]
+    F --> I[仪表/状态栏]
+    G --> J[LiveMap 轨迹]
+    H --> K[GPX 文件]
+```
+
 这里会同时服务 UI 与存储：
 
 - UI 页面 Pull 或订阅运动数据刷新控件；
