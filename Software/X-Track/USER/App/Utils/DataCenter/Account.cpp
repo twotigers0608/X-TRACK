@@ -24,6 +24,8 @@
 #include "DataCenter.h"
 #include "DataCenterLog.h"
 
+#define ACCOUNT_DISCARD_READ_DATA   1
+
 /**
   * @brief  Account constructor
   * @param  id:       Unique name
@@ -47,25 +49,19 @@ Account::Account(
 
     if (bufSize != 0)
     {
-        uint8_t* buf0 = new uint8_t[bufSize];
+        uint8_t* buffer = (uint8_t*)lv_mem_alloc(bufSize * sizeof(uint8_t) * 2);
 
-        if (!buf0)
+        if (!buffer)
         {
-            DC_LOG_ERROR("Account[%s] buf0 malloc failed!", ID);
+            DC_LOG_ERROR("Account[%s] buffer malloc failed!", ID);
             return;
         }
 
-        uint8_t* buf1 = new uint8_t[bufSize];
+        memset(buffer, 0, bufSize * sizeof(uint8_t) * 2);
 
-        if (!buf1)
-        {
-            delete [] buf0;
-            DC_LOG_ERROR("Account[%s] buf1 malloc failed!", ID);
-            return;
-        }
+        uint8_t* buf0 = buffer;
+        uint8_t* buf1 = buffer + bufSize;
 
-        memset(buf0, 0, bufSize);
-        memset(buf1, 0, bufSize);
         PingPongBuffer_Init(&priv.BufferManager, buf0, buf1);
         DC_LOG_INFO("Account[%s] cached %d x2 bytes", ID, bufSize);
         priv.BufferSize = bufSize;
@@ -88,8 +84,7 @@ Account::~Account()
     /* Release cache */
     if(priv.BufferSize)
     {
-        delete priv.BufferManager.buffer[0];
-        delete priv.BufferManager.buffer[1];
+        lv_mem_free(priv.BufferManager.buffer[0]);
     }
 
     /* Delete timer */
@@ -262,7 +257,9 @@ int Account::Publish()
         }
     }
 
+#if ACCOUNT_DISCARD_READ_DATA
     PingPongBuffer_SetReadDone(&priv.BufferManager);
+#endif
 
     return retval;
 }
@@ -322,7 +319,9 @@ int Account::Pull(Account* pub, void* data_p, uint32_t size)
             if (PingPongBuffer_GetReadBuf(&pub->priv.BufferManager, &rBuf))
             {
                 memcpy(data_p, rBuf, size);
+#if ACCOUNT_DISCARD_READ_DATA
                 PingPongBuffer_SetReadDone(&pub->priv.BufferManager);
+#endif
                 DC_LOG_INFO("read done");
                 retval = 0;
             }

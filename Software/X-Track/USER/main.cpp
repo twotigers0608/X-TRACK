@@ -26,6 +26,12 @@
 #include "lvgl/lvgl.h"
 #include "lv_port/lv_port.h"
 
+#if LV_USE_DEMO_BENCHMARK
+
+#include "benchmark.inc"
+
+#else
+
 static void setup()
 {
     HAL::HAL_Init();
@@ -42,8 +48,10 @@ static void loop()
 {
     HAL::HAL_Update();
     lv_task_handler();
-    __WFI();
+    __wfi();
 }
+
+#endif
 
 /**
   * @brief  Main Function
@@ -52,9 +60,7 @@ static void loop()
   */
 int main(void)
 {
-    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
-    GPIO_JTAG_Disable();
-    Delay_Init();
+    Core_Init();
     setup();
     for(;;)loop();
 }

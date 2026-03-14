@@ -36,6 +36,13 @@
   */
 void PageManager::onRootDragEvent(lv_event_t* event)
 {
+    lv_event_code_t eventCode = lv_event_get_code(event);
+
+    if (!(eventCode == LV_EVENT_PRESSED || eventCode == LV_EVENT_PRESSING || eventCode == LV_EVENT_RELEASED))
+    {
+        return;
+    }
+
     lv_obj_t* root = lv_event_get_current_target(event);
     PageBase* base = (PageBase*)lv_event_get_user_data(event);
 
@@ -45,8 +52,7 @@ void PageManager::onRootDragEvent(lv_event_t* event)
         return;
     }
 
-    lv_event_code_t eventCode = lv_event_get_code(event);
-    PageManager* manager = base->Manager;
+    PageManager* manager = base->_Manager;
     LoadAnimAttr_t animAttr;
 
     if (!manager->GetCurrentLoadAnimAttr(&animAttr))
@@ -57,15 +63,23 @@ void PageManager::onRootDragEvent(lv_event_t* event)
 
     if (eventCode == LV_EVENT_PRESSED)
     {
-        if (manager->AnimState.IsSwitchReq)
+        if (manager->_AnimState.IsSwitchReq)
+        {
             return;
+        }
 
-        if (!manager->AnimState.IsBusy)
+        if (!manager->_AnimState.IsBusy)
+        {
             return;
+        }  
 
         PM_LOG_INFO("Root anim interrupted");
         lv_anim_del(root, animAttr.setter);
-        manager->AnimState.IsBusy = false;
+        manager->_AnimState.IsBusy = false;
+
+        /* Temporary showing the bottom page */
+        PageBase* bottomPage = manager->GetStackTopAfter();
+        lv_obj_clear_flag(bottomPage->_root, LV_OBJ_FLAG_HIDDEN);
     }
     else if (eventCode == LV_EVENT_PRESSING)
     {
@@ -90,7 +104,7 @@ void PageManager::onRootDragEvent(lv_event_t* event)
     }
     else if (eventCode == LV_EVENT_RELEASED)
     {
-        if (manager->AnimState.IsSwitchReq)
+        if (manager->_AnimState.IsSwitchReq)
         {
             return;
         }
@@ -121,7 +135,7 @@ void PageManager::onRootDragEvent(lv_event_t* event)
         }
         else if(end != animAttr.push.enter.end)
         {
-            manager->AnimState.IsBusy = true;
+            manager->_AnimState.IsBusy = true;
 
             lv_anim_t a;
             manager->AnimDefaultInit(&a);
@@ -129,9 +143,9 @@ void PageManager::onRootDragEvent(lv_event_t* event)
             lv_anim_set_var(&a, root);
             lv_anim_set_values(&a, start, animAttr.push.enter.end);
             lv_anim_set_exec_cb(&a, animAttr.setter);
-            lv_anim_set_ready_cb(&a, onRootAnimFinish);
+            lv_anim_set_ready_cb(&a, onRootDragAnimFinish);
             lv_anim_start(&a);
-            PM_LOG_INFO("Root anim start");
+            PM_LOG_INFO("Root drag anim start");
         }
     }
 }
@@ -141,11 +155,18 @@ void PageManager::onRootDragEvent(lv_event_t* event)
   * @param  a: Pointer to animation
   * @retval None
   */
-void PageManager::onRootAnimFinish(lv_anim_t* a)
+void PageManager::onRootDragAnimFinish(lv_anim_t* a)
 {
     PageManager* manager = (PageManager*)lv_anim_get_user_data(a);
-    PM_LOG_INFO("Root anim finish");
-    manager->AnimState.IsBusy = false;
+    PM_LOG_INFO("Root drag anim finish");
+    manager->_AnimState.IsBusy = false;
+
+    /* Hide the bottom page */
+    PageBase* bottomPage = manager->GetStackTopAfter();
+    if (bottomPage)
+    {
+        lv_obj_add_flag(bottomPage->_root, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /**
@@ -159,22 +180,10 @@ void PageManager::RootEnableDrag(lv_obj_t* root)
     lv_obj_add_event_cb(
         root,
         onRootDragEvent,
-        LV_EVENT_PRESSED,
+        LV_EVENT_ALL,
         base
     );
-    lv_obj_add_event_cb(
-        root,
-        onRootDragEvent,
-        LV_EVENT_PRESSING,
-        base
-    );
-    lv_obj_add_event_cb(
-        root,
-        onRootDragEvent,
-        LV_EVENT_RELEASED,
-        base
-    );
-    PM_LOG_INFO("Root drag enabled");
+    PM_LOG_INFO("Page(%s) Root drag enabled", base->_Name);
 }
 
 /**
@@ -185,8 +194,8 @@ void PageManager::RootEnableDrag(lv_obj_t* root)
 void PageManager::onRootAsyncLeave(void* data)
 {
     PageBase* base = (PageBase*)data;
-    PM_LOG_INFO("Page(%s) send event: LV_EVENT_LEAVE, need to handle...", base->Name);
-    lv_event_send(base->root, LV_EVENT_LEAVE, base);
+    PM_LOG_INFO("Page(%s) send event: LV_EVENT_LEAVE, need to handle...", base->_Name);
+    lv_event_send(base->_root, LV_EVENT_LEAVE, base);
 }
 
 /**

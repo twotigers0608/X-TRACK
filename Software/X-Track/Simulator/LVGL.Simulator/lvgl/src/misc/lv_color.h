@@ -23,10 +23,6 @@ extern "C" {
 #error "LV_COLOR_DEPTH 24 is deprecated. Use LV_COLOR_DEPTH 32 instead (lv_conf.h)"
 #endif
 
-#if LV_COLOR_DEPTH != 32 && LV_COLOR_SCREEN_TRANSP != 0
-#error "LV_COLOR_SCREEN_TRANSP requires LV_COLOR_DEPTH == 32. Set it in lv_conf.h"
-#endif
-
 #if LV_COLOR_DEPTH != 16 && LV_COLOR_16_SWAP != 0
 #error "LV_COLOR_16_SWAP requires LV_COLOR_DEPTH == 16. Set it in lv_conf.h"
 #endif
@@ -676,7 +672,7 @@ lv_color_hsv_t lv_color_rgb_to_hsv(uint8_t r8, uint8_t g8, uint8_t b8);
 lv_color_hsv_t lv_color_to_hsv(lv_color_t color);
 
 /**
- * Just a wrapper around LV_COLOR_CHROMA_KEY because it might be more convenient to use a function is some cases
+ * Just a wrapper around LV_COLOR_CHROMA_KEY because it might be more convenient to use a function in some cases
  * @return LV_COLOR_CHROMA_KEY
  */
 static inline lv_color_t lv_color_chroma_key(void)
